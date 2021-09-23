@@ -19,6 +19,7 @@ from fairseq.data import iterators
 from fairseq.trainer import Trainer
 from fairseq.meters import AverageMeter, StopwatchMeter
 
+from torch.profiler import profile, ProfilerActivity
 
 def main(args, init_distributed=False):
     utils.import_user_module(args)
@@ -83,7 +84,13 @@ def main(args, init_distributed=False):
         and trainer.get_num_updates() < max_update
     ):
         # train for one epoch
-        train(args, trainer, task, epoch_itr)
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            with_stack=True
+        ) as prof:
+            train(args, trainer, task, epoch_itr)
+
+        prof.export_chrome_trace('/workspace/transfer/pt_trace.json')
 
         if not args.disable_validation and epoch_itr.epoch % args.validate_interval == 0:
             valid_losses = validate(args, trainer, task, epoch_itr, valid_subsets)

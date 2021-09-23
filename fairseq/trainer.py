@@ -19,6 +19,7 @@ from fairseq import checkpoint_utils, distributed_utils, models, optim, utils
 from fairseq.meters import AverageMeter, StopwatchMeter, TimeMeter
 from fairseq.optim import lr_scheduler
 
+from onnxruntime.training.ortmodule import ORTModule
 
 class Trainer(object):
     """Main class for data parallel training.
@@ -41,6 +42,14 @@ class Trainer(object):
         if args.fp16:
             self._criterion = self._criterion.half()
             self._model = self._model.half()
+        class ORTModuleWrapper(torch.nn.Module):
+            def __init__(self, model):
+                super(ORTModuleWrapper, self).__init__()
+                self.model_ = model
+            def forward(self, src_tokens, src_lengths, prev_output_tokens):
+                return self.model_(src_tokens, src_lengths, prev_output_tokens, return_all_hiddens=False)
+        if 'USE_ORT' in os.environ and os.environ['USE_ORT'].lower() in ('true', '1', 'y'):
+            self._model = ORTModule(ORTModuleWrapper(self._model))
         if self.cuda:
             self._criterion = self._criterion.cuda()
             self._model = self._model.cuda()
@@ -267,12 +276,19 @@ class Trainer(object):
                 combine=combine,
                 data_selector=data_selector,
             )
+        if hasattr(self.model, 'max_positions'):
+            max_pos = self.model.max_positions
+        elif hasattr(self.model, 'model_') and hasattr(self.model.model_, 'max_positions'):
+            max_pos = self.model.model_.max_positions
+        else:
+            raise AttributeError('related to max_positions')
         return self.task.get_batch_iterator(
             dataset=self.task.dataset(self.args.train_subset),
             max_tokens=self.args.max_tokens,
             max_sentences=self.args.max_sentences,
             max_positions=utils.resolve_max_positions(
-                self.task.max_positions(), self.model.max_positions()
+                # self.task.max_positions(), self.model.max_positions()
+                self.task.max_positions(), max_pos()
             ),
             ignore_invalid_inputs=True,
             required_batch_size_multiple=self.args.required_batch_size_multiple,
@@ -596,6 +612,8 @@ class Trainer(object):
 
     def get_model(self):
         """Get the (non-wrapped) model instance."""
+        if hasattr(self._model, '_original_module'):
+            return self._model._original_module.model_
         return self._model
 
     def get_criterion(self):
