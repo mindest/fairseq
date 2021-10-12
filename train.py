@@ -19,6 +19,7 @@ from fairseq.data import iterators
 from fairseq.trainer import Trainer
 from fairseq.meters import AverageMeter, StopwatchMeter
 
+from torch.profiler import profile, ProfilerActivity, schedule
 
 def main(args, init_distributed=False):
     utils.import_user_module(args)
@@ -83,7 +84,22 @@ def main(args, init_distributed=False):
         and trainer.get_num_updates() < max_update
     ):
         # train for one epoch
-        train(args, trainer, task, epoch_itr)
+        import os
+        if 'USE_ORT' in os.environ and os.environ['USE_ORT'].lower() in ('true', '1', 'y'):
+            train(args, trainer, task, epoch_itr)
+        else:
+            with profile(
+                activities=[
+                    ProfilerActivity.CPU,
+                    ProfilerActivity.CUDA],
+                schedule=schedule(wait=1, warmup=1, active=5),
+                record_shapes=True,
+                with_stack=True,
+            ) as prof:
+                train(args, trainer, task, epoch_itr, profiler=prof)
+            # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+            prof.export_chrome_trace('/workspace/transfer/pt_trace_with_stack.json')
+            prof.export_stacks("/workspace/transfer/profiler_stacks.txt", "self_cuda_time_total")
 
         if not args.disable_validation and epoch_itr.epoch % args.validate_interval == 0:
             valid_losses = validate(args, trainer, task, epoch_itr, valid_subsets)
@@ -104,7 +120,7 @@ def main(args, init_distributed=False):
     print('| done training in {:.1f} seconds'.format(train_meter.sum))
 
 
-def train(args, trainer, task, epoch_itr):
+def train(args, trainer, task, epoch_itr, profiler=None):
     """Train the model for one epoch."""
     # Update parameters every N batches
     update_freq = args.update_freq[epoch_itr.epoch - 1] \
@@ -125,6 +141,7 @@ def train(args, trainer, task, epoch_itr):
     max_update = args.max_update or math.inf
     for i, samples in enumerate(progress, start=epoch_itr.iterations_in_epoch):
         log_output = trainer.train_step(samples)
+        if profiler is not None: profiler.step()
         if log_output is None:
             continue
 
